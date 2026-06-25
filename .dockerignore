@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+data
+node_modules
+package.json
+package-lock.json
+.pw_*.mjs
+terminals
+*.thr
+*.svg
+SandArtGUI.py
+.DS_Store

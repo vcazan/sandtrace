@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#efe8db">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="SandTrace">
+  <title>SandTrace</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=29">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 36 36" width="36" height="36" role="img">
+            <circle cx="18" cy="18" r="16" class="mark-ring"/>
+            <circle cx="18" cy="18" r="10.5" class="mark-inner"/>
+            <circle cx="18" cy="18" r="2.25" class="mark-ball"/>
+          </svg>
+        </div>
+        <div>
+          <h1>SandTrace</h1>
+          <p>Studio for kinetic sand drawings</p>
+        </div>
+      </div>
+      <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/bmp,image/gif,.png,.jpg,.jpeg,.webp,.bmp,.gif" hidden>
+      <label class="upload-btn" for="file-input">New drawing</label>
+    </header>
+
+    <div class="empty-state" id="empty-state">
+      <label class="empty-drop" id="dropzone" for="file-input">
+        <div class="empty-illu" aria-hidden="true">
+          <svg viewBox="0 0 80 80" width="84" height="84">
+            <circle cx="40" cy="40" r="36" class="empty-ring"/>
+            <circle cx="40" cy="40" r="27" class="empty-ring-inner"/>
+            <circle cx="40" cy="40" r="18" class="empty-ring-inner"/>
+            <circle cx="40" cy="40" r="9" class="empty-ring-inner"/>
+            <circle cx="40" cy="13" r="3.5" class="empty-ball"/>
+          </svg>
+        </div>
+        <p class="empty-eyebrow">Begin</p>
+        <p class="empty-title">A drawing in the sand</p>
+        <p class="empty-sub">Bring a photo, a logo, or a line — we'll trace it into a single continuous path for your table.</p>
+        <span class="empty-cta">Choose an image</span>
+        <span class="empty-hint">or drop it anywhere here</span>
+      </label>
+      <p class="empty-error hidden" id="empty-error"></p>
+    </div>
+
+    <section class="mode-picker hidden" id="mode-picker">
+      <div class="mode-picker-head">
+        <p class="step-eyebrow">Step one</p>
+        <h2>Choose a tracing</h2>
+        <p class="mode-picker-sub">Three readings of your image. Pick the one closest to what you want drawn.</p>
+        <p class="mode-picker-file" id="mode-picker-filename"></p>
+      </div>
+      <div class="mode-picker-loading hidden" id="mode-picker-loading">
+        <div class="spinner"></div>
+        <span>Building previews…</span>
+      </div>
+      <div class="mode-grid" id="mode-grid"></div>
+      <div class="mode-picker-actions">
+        <button type="button" class="primary-btn" id="mode-continue" disabled>Continue</button>
+        <button type="button" class="link-btn" id="mode-reupload">Upload a different image</button>
+      </div>
+    </section>
+
+    <main class="workspace hidden" id="workspace">
+      <div class="stage" id="stage" data-view="outline">
+        <div class="stage-bar">
+          <button type="button" class="back-btn" id="back-to-modes" title="Choose a different style" aria-label="Back to tracing styles">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+              <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Back
+          </button>
+          <span class="stage-state" id="stage-state" aria-live="polite">
+            <span class="stage-dot" aria-hidden="true"></span>
+            <span id="stage-state-label">Outline</span>
+          </span>
+          <span class="stage-caption" id="stage-caption"></span>
+          <button type="button" class="download-btn" id="convert-btn" disabled aria-label="Download .thr file">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" class="dl-icon">
+              <path d="M8 2.5v7m0 0L5 6.8M8 9.5l3-2.7M3.5 12.5h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" class="dl-check">
+              <path d="M3.5 8.5 6.5 11.5 12.5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="btn-label">Download</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+        </div>
+
+        <div class="sand-table-wrap" id="path-wrap">
+          <svg id="outline-canvas" viewBox="0 0 400 400" aria-label="Detection outline"></svg>
+          <svg id="path-canvas" viewBox="0 0 400 400" aria-label="Sand path preview">
+            <circle cx="200" cy="200" r="192" class="table-ring"/>
+          </svg>
+        </div>
+
+        <div class="playback-bar playback-overlay hidden" id="trace-controls">
+          <button type="button" class="play-btn" id="trace-play" title="Play" aria-label="Play">▶</button>
+          <button type="button" class="icon-btn" id="trace-pause" disabled title="Pause" aria-label="Pause">⏸</button>
+          <button type="button" class="icon-btn" id="trace-reset" title="Reset" aria-label="Reset">↺</button>
+          <input type="range" id="trace-scrub" min="0" max="1000" value="0" aria-label="Playback position">
+          <label class="speed-label">Speed
+            <input type="range" id="trace-speed" min="1" max="10" value="4" aria-label="Playback speed">
+          </label>
+          <div class="legend">
+            <span class="legend-nav">Navigate</span>
+            <span class="legend-outline">Outline</span>
+            <span class="legend-draw">Draw</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls" id="controls">
+        <section class="meta-bar">
+          <span class="filename" id="filename"></span>
+          <span class="pill pill-accent hidden" id="auto-preset"></span>
+          <span class="status-line" id="status-line"></span>
+          <div class="download-row hidden" id="download-row">
+            <button type="button" class="link-btn" id="download-svg">Also download the SVG</button>
+          </div>
+        </section>
+
+        <div class="panel-block settings-panel">
+          <div class="panel-head-row">
+            <div>
+              <p class="step-eyebrow">Step two</p>
+              <h2>Refine</h2>
+            </div>
+            <button type="button" class="link-btn" id="reset-settings">Reset</button>
+          </div>
+
+          <div class="settings-grid settings-basic">
+            <label class="setting-edges full">Edge detail <output id="blur-val">3</output>
+              <input type="range" id="blur" min="1" max="15" step="2" value="3">
+            </label>
+            <label class="setting-threshold hidden full">Brightness cutoff <output id="threshold-val">128</output>
+              <input type="range" id="threshold" min="0" max="255" value="128">
+            </label>
+            <label class="full">Smoothing <output id="smooth-val">2</output>
+              <input type="range" id="smooth" min="0" max="5" value="2">
+            </label>
+            <label class="check"><input type="checkbox" id="mirror"> Mirror image</label>
+            <label class="check"><input type="checkbox" id="add-home"> Return to center when done</label>
+          </div>
+
+          <button type="button" class="ghost-btn" id="toggle-advanced" aria-expanded="false">Advanced options</button>
+          <div class="settings-advanced-body collapsed" id="settings-advanced">
+            <div class="settings-grid">
+              <label class="setting-mode hidden full">Detection mode
+                <select id="mode">
+                  <option value="edges">Edge detection</option>
+                  <option value="silhouette">Silhouette</option>
+                  <option value="threshold">Threshold</option>
+                </select>
+              </label>
+              <label class="setting-edges">Edge low <output id="canny-low-val">30</output>
+                <input type="range" id="canny-low" min="5" max="200" value="30">
+              </label>
+              <label class="setting-edges">Edge high <output id="canny-high-val">100</output>
+                <input type="range" id="canny-high" min="10" max="300" value="100">
+              </label>
+              <label>Ignore small marks <output id="min-length-val">20</output>
+                <input type="range" id="min-length" min="5" max="80" value="20">
+              </label>
+              <label>Max detail <output id="max-points-val">15000</output>
+                <input type="range" id="max-points" min="5000" max="40000" step="1000" value="15000">
+              </label>
+              <label>Ball start
+                <select id="ball-start">
+                  <option value="center">Center</option>
+                  <option value="edge">Edge</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+              <label class="check setting-edges"><input type="checkbox" id="thin" checked> Thin edges</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-block preview-source">
+          <h2>Source image</h2>
+          <div class="thumb-wrap">
+            <img id="original-image" alt="Uploaded image">
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js?v=21"></script>
+</body>
+</html>

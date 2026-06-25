@@ -1,0 +1,34 @@
+# Runtime data (uploads/outputs are kept in the OS temp dir at runtime)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Node / test tooling (used only for local browser tests)
+node_modules/
+package.json
+package-lock.json
+.pw_*.mjs
+
+# Generated output files
+*.thr
+
+# Deployment config (specific to your own Fly.io app)
+fly.toml
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
