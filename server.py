@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
 import tempfile
 import time
@@ -15,7 +16,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -166,6 +167,7 @@ class ConvertSettings(BaseModel):
     ball_start: str = "center"
     mirror: bool = False
     add_home: bool = False
+    centerline: bool = False
 
 
 def _save_upload(upload: UploadFile) -> tuple[str, Path]:
@@ -212,6 +214,7 @@ def _shrink_upload(path: Path, max_side: int = MAX_IMAGE_SIDE) -> None:
 _PREVIEW_KEYS = {
     "mode", "blur", "canny_low", "canny_high", "threshold", "invert",
     "min_area", "min_length", "smooth", "thin", "straighten", "max_dim",
+    "centerline",
 }
 
 _CONVERT_KEYS = _PREVIEW_KEYS | {
@@ -229,11 +232,12 @@ def _convert_kwargs(settings: ConvertSettings) -> dict:
     return {k: data[k] for k in _CONVERT_KEYS}
 
 
-def _build_output(job: dict, settings: ConvertSettings) -> tuple[dict, np.ndarray, int]:
+def _build_output(job: dict, settings: ConvertSettings,
+                  progress_cb=None) -> tuple[dict, np.ndarray, int]:
     """Run full pipeline; returns (raw result, final polar path, elapsed ms)."""
     started = time.perf_counter()
     kwargs = _convert_kwargs(settings)
-    result = core.build_thr_path(job["image_path"], **kwargs)
+    result = core.build_thr_path(job["image_path"], progress_cb=progress_cb, **kwargs)
     final = build_final_thr(
         result,
         mirror=settings.mirror,
@@ -397,22 +401,22 @@ async def preview_path(
         raise HTTPException(404, "Session expired — please upload the image again")
     settings = ConvertSettings.model_validate_json(settings_json)
 
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def progress_cb(step, total):
+        loop.call_soon_threadsafe(queue.put_nowait, {"progress": int(step), "total": int(total)})
+
     def _run():
-        try:
-            result, final, elapsed_ms = _build_output(job, settings)
-        except Exception as exc:
-            raise RuntimeError(str(exc)) from exc
+        result, final, elapsed_ms = _build_output(job, settings, progress_cb=progress_cb)
         display = build_final_thr(
-            result,
-            mirror=settings.mirror,
-            ball_start=settings.ball_start,
-            table_orientation=False,
+            result, mirror=settings.mirror,
+            ball_start=settings.ball_start, table_orientation=False,
         )
-        layers = _preview_layers_svg(result, settings)
         payload = {
             "points": len(final),
             "n_outline": int(result.get("n_outline", 0) or 0),
-            "path_layers": layers,
+            "path_layers": _preview_layers_svg(result, settings),
             "trace_segments": build_trace_segments(
                 result, mirror=settings.mirror, ball_start=settings.ball_start
             ),
@@ -420,9 +424,6 @@ async def preview_path(
             "path_ms": elapsed_ms,
             "settings_key": settings.model_dump_json(),
         }
-        # Cache ONLY what /api/convert needs to skip recompute. Do NOT keep the
-        # heavy response payload (trace_segments, layers, svg) in memory — that
-        # bloated each retained job and led to OOM under load.
         job["cached"] = {
             "settings_key": payload["settings_key"],
             "result": result,
@@ -431,8 +432,25 @@ async def preview_path(
         }
         return payload
 
-    loop = __import__("asyncio").get_event_loop()
-    return await loop.run_in_executor(_executor, _run)
+    async def stream():
+        # NDJSON: a series of {"progress",...} lines, then one {"done":true,...payload}.
+        fut = loop.run_in_executor(_executor, _run)
+        while not fut.done():
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.15)
+                yield json.dumps(item) + "\n"
+            except asyncio.TimeoutError:
+                pass
+        while not queue.empty():
+            yield json.dumps(queue.get_nowait()) + "\n"
+        try:
+            payload = await fut
+        except Exception as exc:
+            yield json.dumps({"error": str(exc)}) + "\n"
+            return
+        yield json.dumps({"done": True, **payload}) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @app.post("/api/convert")

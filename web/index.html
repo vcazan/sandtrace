@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=29">
+  <link rel="stylesheet" href="styles.css?v=31">
 </head>
 <body>
   <div class="app">
@@ -103,6 +103,16 @@
           <svg id="path-canvas" viewBox="0 0 400 400" aria-label="Sand path preview">
             <circle cx="200" cy="200" r="192" class="table-ring"/>
           </svg>
+          <div class="path-progress hidden" id="path-progress" role="status" aria-live="polite">
+            <div class="progress-dial">
+              <svg class="progress-ring" viewBox="0 0 72 72" aria-hidden="true">
+                <circle class="progress-ring-track" cx="36" cy="36" r="32"/>
+                <circle class="progress-ring-bar" cx="36" cy="36" r="32"/>
+              </svg>
+              <span class="progress-pct" id="progress-pct">0%</span>
+            </div>
+            <span class="progress-label">Tracing your path…</span>
+          </div>
         </div>
 
         <div class="playback-bar playback-overlay hidden" id="trace-controls">
@@ -150,6 +160,7 @@
             <label class="full">Smoothing <output id="smooth-val">2</output>
               <input type="range" id="smooth" min="0" max="5" value="2">
             </label>
+            <label class="check setting-line"><input type="checkbox" id="centerline"> Single-stroke line art (no retracing) <span class="experimental-tag">experimental</span></label>
             <label class="check"><input type="checkbox" id="mirror"> Mirror image</label>
             <label class="check"><input type="checkbox" id="add-home"> Return to center when done</label>
           </div>
@@ -198,6 +209,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>

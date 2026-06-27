@@ -105,6 +105,302 @@ def thin_edges(binary: np.ndarray) -> np.ndarray:
     return skeleton
 
 
+def _zhang_suen_thin(mask: np.ndarray) -> np.ndarray:
+    """Zhang–Suen thinning -> clean 1-pixel skeleton (bool array).
+
+    Dependency-free (the deployed headless OpenCV has no ``ximgproc.thinning``).
+    Produces a well-formed 8-connected skeleton suitable for graph tracing.
+    """
+    img = (mask > 0).astype(np.uint8)
+    if img.sum() == 0:
+        return img.astype(bool)
+
+    changing = True
+    while changing:
+        changing = False
+        for step in (0, 1):
+            p = np.pad(img, 1)
+            P2 = p[0:-2, 1:-1]; P3 = p[0:-2, 2:]; P4 = p[1:-1, 2:]
+            P5 = p[2:,   2:];   P6 = p[2:,   1:-1]; P7 = p[2:,   0:-2]
+            P8 = p[1:-1, 0:-2]; P9 = p[0:-2, 0:-2]
+
+            B = P2 + P3 + P4 + P5 + P6 + P7 + P8 + P9
+            seq = (P2, P3, P4, P5, P6, P7, P8, P9, P2)
+            A = np.zeros_like(B)
+            for i in range(8):
+                A += ((seq[i] == 0) & (seq[i + 1] == 1)).astype(np.uint8)
+
+            if step == 0:
+                c1 = P2 * P4 * P6
+                c2 = P4 * P6 * P8
+            else:
+                c1 = P2 * P4 * P8
+                c2 = P2 * P6 * P8
+
+            cond = (img == 1) & (B >= 2) & (B <= 6) & (A == 1) & (c1 == 0) & (c2 == 0)
+            if cond.any():
+                img[cond] = 0
+                changing = True
+    return img.astype(bool)
+
+
+def _centerline_skeleton(binary: np.ndarray) -> np.ndarray:
+    """Merge double edges into solid strokes, then skeletonise to 1px centre lines."""
+    if binary is None or binary.max() == 0:
+        return binary
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    solid = cv2.dilate(binary, kernel, iterations=1)
+    solid = cv2.morphologyEx(solid, cv2.MORPH_CLOSE, kernel, iterations=1)
+    skel = _zhang_suen_thin(solid)
+    return (skel.astype(np.uint8)) * 255
+
+
+def extract_centerlines(skeleton: np.ndarray,
+                        min_length_px: float = 3.0) -> list:
+    """Trace a 1-pixel skeleton into OPEN centre-line polylines.
+
+    ``cv2.findContours`` walks *around* every stroke (down one side and back the
+    other), so each line ends up drawn twice. Instead we treat the skeleton as a
+    pixel graph and walk each edge exactly once, yielding the centre line of
+    every stroke — so the table draws each line a single time.
+
+    Returns a list of Nx2 float32 (x, y) arrays.
+    """
+    if skeleton is None or skeleton.max() == 0:
+        return []
+    ys, xs = np.nonzero(skeleton > 0)
+    pts = set(zip(xs.tolist(), ys.tolist()))
+    if not pts:
+        return []
+
+    offsets = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+               (1, 0), (-1, 1), (0, 1), (1, 1))
+
+    def neighbours(p):
+        x, y = p
+        return [(x + dx, y + dy) for dx, dy in offsets if (x + dx, y + dy) in pts]
+
+    deg = {p: len(neighbours(p)) for p in pts}
+    seen: set = set()          # undirected edges already traced
+    polylines: list = []
+
+    def walk(start, first):
+        """Walk a stroke, flowing THROUGH junctions along the straightest
+        continuation so crossings don't shatter a line into stubs."""
+        line = [start, first]
+        seen.add(frozenset((start, first)))
+        prev, cur = start, first
+        while True:
+            cands = [n for n in neighbours(cur)
+                     if frozenset((cur, n)) not in seen]
+            if not cands:
+                break
+            if len(cands) == 1:
+                nxt = cands[0]
+            else:
+                # pick the candidate that bends the least (straightest path)
+                idx, idy = cur[0] - prev[0], cur[1] - prev[1]
+                inorm = math.hypot(idx, idy) or 1.0
+                best, best_dot = None, -2.0
+                for n in cands:
+                    odx, ody = n[0] - cur[0], n[1] - cur[1]
+                    onorm = math.hypot(odx, ody) or 1.0
+                    dot = (idx * odx + idy * ody) / (inorm * onorm)
+                    if dot > best_dot:
+                        best_dot, best = dot, n
+                nxt = best
+            seen.add(frozenset((cur, nxt)))
+            line.append(nxt)
+            prev, cur = cur, nxt
+        return line
+
+    # 1) Open strokes: start at endpoints. 2) leftover junction spurs.
+    # 3) closed loops (all degree-2). This order yields natural long strokes.
+    for selector in (lambda d: d == 1, lambda d: d >= 3, lambda d: d == 2):
+        for p in [q for q in pts if selector(deg[q])]:
+            for n in neighbours(p):
+                if frozenset((p, n)) not in seen:
+                    polylines.append(walk(p, n))
+
+    result = []
+    for line in polylines:
+        arr = np.asarray(line, dtype=np.float32)
+        if len(arr) < 2:
+            continue
+        if float(np.sum(np.linalg.norm(np.diff(arr, axis=0), axis=1))) >= min_length_px:
+            result.append(arr)
+    return result
+
+
+def _route_bridges_along_path(path: np.ndarray,
+                              gap_thresh: float = 22.0,
+                              jump_radius: float = 6.0) -> np.ndarray:
+    """Reroute long straight 'bridges' so travel follows already-drawn grooves.
+
+    A continuous sand path must physically move between separate strokes. A
+    straight hop across blank sand leaves a visible stray groove; retracing an
+    existing groove is invisible. This finds each long jump in ``path`` and
+    replaces it with the shortest route through the rest of the path (grooves +
+    tiny <jump_radius hops), leaving only the unavoidable minimal gap visible.
+    """
+    import heapq
+    pts = np.asarray(path, dtype=np.float32)
+    n = len(pts)
+    if n < 3:
+        return pts
+
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    long_idx = [i for i in range(n - 1) if seg[i] > gap_thresh]
+    if not long_idx:
+        return pts
+
+    # Spatial hash for near-point "jump" edges between overlapping grooves.
+    cell = max(jump_radius, 1.0)
+    grid: dict = {}
+    for i, (x, y) in enumerate(pts):
+        grid.setdefault((int(x / cell), int(y / cell)), []).append(i)
+
+    def neighbours(i):
+        x, y = pts[i]
+        gx, gy = int(x / cell), int(y / cell)
+        out = []
+        # consecutive groove edges (skip the long bridges themselves)
+        if i > 0 and seg[i - 1] <= gap_thresh:
+            out.append((i - 1, float(seg[i - 1])))
+        if i < n - 1 and seg[i] <= gap_thresh:
+            out.append((i + 1, float(seg[i])))
+        # short jumps to nearby grooves
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in grid.get((gx + dx, gy + dy), ()):
+                    if j == i:
+                        continue
+                    d = float(math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
+                    if d <= jump_radius:
+                        out.append((j, d))
+        return out
+
+    def shortest(src, dst):
+        # Dijkstra src->dst; returns list of indices or None
+        dist = {src: 0.0}
+        prev = {}
+        pq = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if u == dst:
+                break
+            if d > dist.get(u, 1e18):
+                continue
+            for v, w in neighbours(u):
+                nd = d + w
+                if nd < dist.get(v, 1e18):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(pq, (nd, v))
+        if dst not in dist:
+            return None
+        route = [dst]
+        while route[-1] != src:
+            route.append(prev[route[-1]])
+        return route[::-1]
+
+    long_set = set(long_idx)
+    out = [pts[0]]
+    for i in range(n - 1):
+        if i in long_set:
+            route = shortest(i, i + 1)
+            # only reroute if it meaningfully beats the straight hop
+            if route and len(route) > 2:
+                rlen = sum(float(math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1]))
+                           for a, b in zip(route, route[1:]))
+                # visible cost of reroute = its longest single hop
+                vis = max(float(math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1]))
+                          for a, b in zip(route, route[1:]))
+                if vis < seg[i] - 1.0:
+                    for k in route[1:]:
+                        out.append(pts[k])
+                    continue
+        out.append(pts[i + 1])
+    return np.asarray(out, dtype=np.float32)
+
+
+def assemble_open_polylines(polylines: list,
+                            max_bridge_px: float | None = None) -> np.ndarray:
+    """Chain open strokes into one continuous path, each drawn once, with the
+    shortest possible connector ("bridge") travel between them.
+
+    Strokes are ordered with a nearest-neighbour tour, then refined with 2-opt
+    (each stroke is orientable) to minimise the total length of the straight
+    hops between strokes — so there are no retraces and minimal stray lines.
+    """
+    strokes = [np.asarray(p, dtype=np.float32) for p in polylines if len(p) >= 2]
+    if not strokes:
+        return np.zeros((0, 2), dtype=np.float32)
+    if len(strokes) == 1:
+        return strokes[0]
+
+    n = len(strokes)
+    s0 = np.array([s[0] for s in strokes])    # start point of each stroke
+    s1 = np.array([s[-1] for s in strokes])   # end point of each stroke
+
+    def entry(i, f):  # point we enter stroke i, given flip f
+        return s1[i] if f else s0[i]
+
+    def exit_(i, f):  # point we leave stroke i
+        return s0[i] if f else s1[i]
+
+    def dist(a, b):
+        return float(math.hypot(a[0] - b[0], a[1] - b[1]))
+
+    # --- nearest-neighbour construction (start from the longest stroke) ---
+    arc = [float(np.sum(np.linalg.norm(np.diff(s, axis=0), axis=1))) for s in strokes]
+    start = int(np.argmax(arc))
+    used = [False] * n
+    used[start] = True
+    order = [(start, False)]
+    cur = exit_(start, False)
+    for _ in range(n - 1):
+        best_i, best_f, best_d = -1, False, float("inf")
+        for i in range(n):
+            if used[i]:
+                continue
+            d0 = dist(s0[i], cur)
+            d1 = dist(s1[i], cur)
+            if d0 < best_d:
+                best_i, best_f, best_d = i, False, d0
+            if d1 < best_d:
+                best_i, best_f, best_d = i, True, d1
+        used[best_i] = True
+        order.append((best_i, best_f))
+        cur = exit_(best_i, best_f)
+
+    # --- 2-opt refinement (reverse a run of strokes, flipping each) ---
+    def conn(a, b):
+        return dist(exit_(*a), entry(*b))
+
+    improved, passes = True, 0
+    while improved and passes < 8:
+        improved = False
+        passes += 1
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                before = (conn(order[i - 1], order[i]) if i > 0 else 0.0) + \
+                         (conn(order[j], order[j + 1]) if j + 1 < n else 0.0)
+                rev_i = (order[j][0], not order[j][1])
+                rev_j = (order[i][0], not order[i][1])
+                after = (conn(order[i - 1], rev_i) if i > 0 else 0.0) + \
+                        (conn(rev_j, order[j + 1]) if j + 1 < n else 0.0)
+                if after + 1e-6 < before:
+                    order[i:j + 1] = [(idx, not f) for (idx, f) in reversed(order[i:j + 1])]
+                    improved = True
+
+    path = []
+    for idx, f in order:
+        seg = strokes[idx]
+        path.append(seg[::-1] if f else seg)
+    return np.vstack(path).astype(np.float32)
+
+
 def threshold_image(gray: np.ndarray, threshold: int = 128,
                     invert: bool = True) -> np.ndarray:
     mode = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
@@ -1538,12 +1834,23 @@ def extract_preview_data(image_path: str,
                          smooth: int = 2,
                          thin: bool = True,
                          straighten: float = 0.90,
-                         max_dim: int = 800):
+                         max_dim: int = 800,
+                         centerline: bool = False):
     gray = load_and_preprocess(image_path, max_dim)
     h, w = gray.shape
+    use_centerline = (centerline and mode in ("edges", "threshold"))
     if mode == "silhouette":
         binary = build_silhouette_binary(gray)
         raw_contours, _ = extract_silhouette_contours(binary, w, h)
+    elif use_centerline:
+        if mode == "threshold":
+            binary = threshold_image(gray, threshold=threshold, invert=invert)
+        else:
+            binary = detect_edges(gray, blur=blur, low=canny_low, high=canny_high)
+        skeleton = _centerline_skeleton(binary)
+        raw_contours = extract_centerlines(
+            skeleton, min_length_px=max(2.0, min_length * 0.25))
+        binary = skeleton
     elif mode == "edges":
         binary = detect_edges(gray, blur=blur, low=canny_low, high=canny_high)
         if thin:
@@ -1554,8 +1861,9 @@ def extract_preview_data(image_path: str,
         binary = threshold_image(gray, threshold=threshold, invert=invert)
         raw_contours = extract_contours(binary, min_area=min_area)
         raw_contours = filter_short_contours(raw_contours, min_length=min_length)
-    contours     = smooth_contours(raw_contours, strength=smooth)
-    contours     = straighten_contours(contours, tolerance=straighten)
+    contours     = smooth_contours(raw_contours, strength=min(smooth, 2) if use_centerline else smooth)
+    if not use_centerline:
+        contours = straighten_contours(contours, tolerance=straighten)
     return gray, binary, raw_contours, contours, w, h
 
 
@@ -2030,6 +2338,7 @@ def build_thr_path(image_path: str,
                    greedy_pct: int = 100,
                    fill: float = 1.0,
                    ball_start: str = 'center',
+                   centerline: bool = False,
                    progress_cb=None) -> dict:
     """
     Full pipeline: image -> dict with keys:
@@ -2048,6 +2357,7 @@ def build_thr_path(image_path: str,
     """
     gray = load_and_preprocess(image_path, max_dim)
     h, w = gray.shape
+    centerline_mode = False
 
     if mode == 'silhouette':
         binary = build_silhouette_binary(gray)
@@ -2057,6 +2367,27 @@ def build_thr_path(image_path: str,
                     'navigate': None, 'n_outline': 0}
         contours_px = smooth_contours(contours_px, strength=smooth)
         contours_px = straighten_contours(contours_px, tolerance=straighten)
+    elif centerline and mode in ('edges', 'threshold'):
+        # Opt-in single-stroke line art: skeletonise the strokes to their centre
+        # lines and trace each exactly once (no findContours double-trace, no
+        # outline pass), connecting strokes with the shortest possible hops.
+        if mode == 'threshold':
+            binary = threshold_image(gray, threshold=threshold, invert=invert)
+        else:
+            binary = detect_edges(gray, blur=blur, low=canny_low, high=canny_high)
+        skeleton = _centerline_skeleton(binary)
+        # Centre lines are ~half the length of wrapped contours, so use a gentler
+        # length floor than the closed-contour path — otherwise fine detail like
+        # eyelashes (short strokes) gets filtered out.
+        contours_px = extract_centerlines(
+            skeleton, min_length_px=max(2.0, min_length * 0.25))
+        if not contours_px:
+            return {'polar': np.zeros((1, 2)), 'outline': None,
+                    'navigate': None, 'n_outline': 0}
+        # Light smoothing only — straightening would flatten the open curves.
+        contours_px = smooth_contours(contours_px, strength=min(smooth, 2))
+        contour_hierarchy = None
+        centerline_mode = True
     elif mode == 'edges':
         binary = detect_edges(gray, blur=blur, low=canny_low, high=canny_high)
         if thin:
@@ -2093,10 +2424,23 @@ def build_thr_path(image_path: str,
         bridge_limit = max(25.0, float(min(w, h)) * 0.14)
         max_islands  = 24
 
-    merged_px = build_merged_path(
-        contours_px, w, h, progress_cb=progress_cb,
-        contour_hierarchy=contour_hierarchy, boundary_mask=binary,
-        max_bridge_px=bridge_limit, max_islands=max_islands)
+    if centerline_mode:
+        # Line art: each stroke is a single clean centre line (no findContours
+        # double-edge wobble). Route them through the island-splicer so travel
+        # between strokes doubles back ALONG drawn lines (invisible in sand)
+        # instead of cutting visible hops across blank sand. No separate outline
+        # pass (that would redraw lines a second time).
+        merged_px = build_merged_path(
+            contours_px, w, h, progress_cb=progress_cb,
+            contour_hierarchy=None, boundary_mask=skeleton,
+            max_bridge_px=bridge_limit, max_islands=len(contours_px))
+        # Hide any remaining long travel hops by rerouting them along grooves.
+        merged_px = _route_bridges_along_path(merged_px)
+    else:
+        merged_px = build_merged_path(
+            contours_px, w, h, progress_cb=progress_cb,
+            contour_hierarchy=contour_hierarchy, boundary_mask=binary,
+            max_bridge_px=bridge_limit, max_islands=max_islands)
     if len(merged_px) == 0:
         return {'polar': np.zeros((1, 2)), 'outline': None,
                 'navigate': None, 'n_outline': 0}
@@ -2106,10 +2450,13 @@ def build_thr_path(image_path: str,
             merged_px, np.array(center, dtype=np.float32))
 
     # ---- Phase 2: outline (outermost actual arcs + straight bridges) -----
-    outline_px = _build_outline_px(
-        contours_px, w, h,
-        boundary_mask=binary,
-        contour_hierarchy=contour_hierarchy)
+    if centerline_mode:
+        outline_px = None
+    else:
+        outline_px = _build_outline_px(
+            contours_px, w, h,
+            boundary_mask=binary,
+            contour_hierarchy=contour_hierarchy)
     if outline_px is not None and len(outline_px) > 1:
         # Rotate so outline[0] == nearest point to merged_px[0].
         # Both phases then start from the same pixel -> seamless junction.

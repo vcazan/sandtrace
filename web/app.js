@@ -57,6 +57,7 @@ function defaultSettings() {
     ball_start: "center",
     mirror: false,
     add_home: false,
+    centerline: false,
   };
 }
 
@@ -75,6 +76,7 @@ function readSettingsFromUI() {
     mirror: $("#mirror").checked,
     thin: $("#thin").checked,
     add_home: $("#add-home").checked,
+    centerline: $("#centerline").checked,
   };
 }
 
@@ -91,6 +93,7 @@ function applySettingsToUI(settings) {
   $("#mirror").checked = !!settings.mirror;
   $("#thin").checked = settings.thin !== false;
   $("#add-home").checked = !!settings.add_home;
+  $("#centerline").checked = !!settings.centerline;
   syncRangeOutputs();
   syncModeFields();
   state.settings = { ...state.settings, ...settings };
@@ -115,6 +118,10 @@ function syncModeFields() {
   });
   document.querySelectorAll(".setting-threshold").forEach((el) => {
     el.classList.toggle("hidden", !threshold);
+  });
+  // "Draw each line once" applies to line-based modes (edges + threshold)
+  document.querySelectorAll(".setting-line").forEach((el) => {
+    el.classList.toggle("hidden", !(edges || threshold));
   });
 }
 
@@ -557,12 +564,61 @@ async function fetchContourPreview() {
   return res.json();
 }
 
-async function fetchPathPreview(requestId) {
+async function fetchPathPreview(requestId, onProgress) {
   state.settings = readSettingsFromUI();
-  const res = await jobPost("/api/preview-path", state.settings);
-  const data = await res.json();
+  const doFetch = () => {
+    const f = new FormData();
+    f.append("job_id", state.jobId);
+    f.append("settings_json", JSON.stringify(state.settings));
+    return fetch("/api/preview-path", { method: "POST", body: f });
+  };
+  let res = await doFetch();
+  if (res.status === 404 && state.currentFile) {
+    await reestablishJob();
+    res = await doFetch();
+  }
+  if (!res.ok) throw new Error(await apiError(res));
+
+  // Stream NDJSON: progress lines, then a final {"done": true, ...payload}.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let result = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.error) throw new Error(msg.error);
+      if (msg.done) result = msg;
+      else if (msg.progress !== undefined && onProgress) onProgress(msg.progress, msg.total);
+    }
+  }
   if (requestId !== state.pathRequestId) return null;
-  return data;
+  return result;
+}
+
+function showPathProgress(on) {
+  const el = $("#path-progress");
+  if (!on) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.classList.add("indeterminate");
+}
+
+function setPathProgress(step, total) {
+  const el = $("#path-progress");
+  if (!total || total <= 0) { el.classList.add("indeterminate"); return; }
+  el.classList.remove("indeterminate");
+  const frac = Math.max(0, Math.min(1, step / total));
+  const C = 201.06; // 2·π·32
+  el.querySelector(".progress-ring-bar").style.strokeDashoffset = String(C * (1 - frac));
+  $("#progress-pct").textContent = Math.round(frac * 100) + "%";
 }
 
 async function runContourPreview() {
@@ -579,8 +635,21 @@ async function runPathPreview() {
   const requestId = ++state.pathRequestId;
   setBuilding(true);
 
+  // Designed progress loader appears only if the build runs longer than 3s.
+  let shown = false;
+  let last = null;
+  const slowTimer = setTimeout(() => {
+    shown = true;
+    showPathProgress(true);
+    if (last) setPathProgress(last.step, last.total);
+  }, 3000);
+  const onProgress = (step, total) => {
+    last = { step, total };
+    if (shown) setPathProgress(step, total);
+  };
+
   try {
-    const pathData = await fetchPathPreview(requestId);
+    const pathData = await fetchPathPreview(requestId, onProgress);
     if (!pathData) return;
 
     state.pathLayers = pathData.path_layers;
@@ -593,6 +662,8 @@ async function runPathPreview() {
     syncView();           // seamless: fade from outline to the finished path
     setStatus("Press play to watch it draw, then save.");
   } finally {
+    clearTimeout(slowTimer);
+    showPathProgress(false);
     if (requestId === state.pathRequestId) setBuilding(false);
   }
 }
@@ -760,7 +831,7 @@ $("#reset-settings").addEventListener("click", () => {
   });
 });
 
-["ball-start", "mirror", "thin", "add-home"].forEach((id) => {
+["ball-start", "mirror", "thin", "add-home", "centerline"].forEach((id) => {
   $(`#${id}`).addEventListener("change", schedulePreview);
 });
 

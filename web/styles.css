@@ -544,6 +544,45 @@ body {
   border-top-color: var(--clay); border-radius: 50%; animation: spin 0.7s linear infinite;
 }
 
+/* ---------- Real-time path progress (appears only on slow builds) ---------- */
+.path-progress {
+  position: absolute; inset: 0; z-index: 6;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.15rem;
+  background: radial-gradient(circle at 50% 50%,
+    color-mix(in srgb, var(--sand-hi) 88%, transparent) 0%,
+    color-mix(in srgb, var(--sand-mid) 80%, transparent) 100%);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: view-in 0.3s var(--ease) both;
+}
+.progress-dial { position: relative; width: 84px; height: 84px; }
+.progress-ring { width: 84px; height: 84px; transform: rotate(-90deg); display: block; }
+.progress-ring-track { fill: none; stroke: rgba(106,74,44,0.18); stroke-width: 5; }
+.progress-ring-bar {
+  fill: none; stroke: var(--clay); stroke-width: 5; stroke-linecap: round;
+  stroke-dasharray: 201.06;            /* 2·π·32 */
+  stroke-dashoffset: 201.06;
+  transition: stroke-dashoffset 0.25s var(--ease);
+  filter: drop-shadow(0 1px 2px rgba(143,57,23,0.3));
+}
+.path-progress.indeterminate .progress-ring { animation: spin 1.1s linear infinite; }
+.path-progress.indeterminate .progress-ring-bar {
+  stroke-dasharray: 50 160; stroke-dashoffset: 0; transition: none;
+}
+.progress-pct {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 0.92rem; font-weight: 600; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.path-progress.indeterminate .progress-pct { display: none; }
+.progress-label {
+  margin-top: 1.1rem;
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-2);
+}
+
 /* ---------- Playback bar (beneath the bowl, like a turntable) ---------- */
 .playback-overlay {
   display: flex; align-items: center; gap: 0.55rem;
@@ -636,6 +675,21 @@ input[type="range"] {
   color: var(--ink); font-weight: 600; cursor: pointer; min-height: 34px;
 }
 .settings-grid label.check input { width: 18px; height: 18px; accent-color: var(--clay); flex-shrink: 0; }
+.experimental-tag {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--clay);
+  background: var(--clay-soft);
+  border: 1px solid rgba(178, 74, 38, 0.3);
+  border-radius: 999px;
+  padding: 0.1rem 0.4rem;
+  margin-left: 0.15rem;
+  white-space: nowrap;
+}
+
 .settings-grid label output {
   font-family: var(--mono); font-weight: 500; color: var(--clay); float: right;
 }
