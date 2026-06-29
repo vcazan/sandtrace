@@ -29,6 +29,13 @@ const trace = {
 
 const $ = (sel) => document.querySelector(sel);
 
+// Plausible custom events (no-op if the analytics script isn't loaded).
+function track(event, props) {
+  try {
+    if (window.plausible) window.plausible(event, props ? { props } : undefined);
+  } catch (e) { /* ignore */ }
+}
+
 const CANVAS_DEFS = `<defs>
   <radialGradient id="ball-grad" cx="38%" cy="34%" r="68%">
     <stop offset="0%" stop-color="#eef0f2"/>
@@ -658,6 +665,10 @@ async function runPathPreview() {
     state.waypointCount = pathData.points;
     state.pathReady = true;
     state.pathStale = false;
+    if (!state.generateTracked) {
+      track("Generate", { mode: state.settings.mode });
+      state.generateTracked = true;   // count once per image, not per slider tweak
+    }
     showPathUI(true);
     syncView();           // seamless: fade from outline to the finished path
     setStatus("Press play to watch it draw, then save.");
@@ -730,6 +741,7 @@ async function saveThr() {
 
     // One click → the .thr lands in the browser's downloads, named after the image.
     downloadText(`${stem}.thr`, data.thr_text, "text/plain");
+    track("Download", { mode: state.settings.mode, format: "thr" });
 
     // Keep the SVG available as a quiet secondary option.
     $("#download-row").classList.remove("hidden");
@@ -759,6 +771,8 @@ async function handleFile(file) {
     state.currentFile = file;   // kept so we can transparently re-create the session
     const data = await uploadFile(file);
     state.jobId = data.job_id;
+    state.generateTracked = false;   // one "Generate" event per uploaded image
+    track("Upload");
 
     $("#filename").textContent = data.filename;
     $("#original-image").src = `/api/image/${data.job_id}?t=${Date.now()}`;
@@ -838,6 +852,7 @@ $("#reset-settings").addEventListener("click", () => {
 $("#convert-btn").addEventListener("click", () => saveThr().catch((e) => setStatus(e.message)));
 $("#download-svg").addEventListener("click", () => {
   if (state.lastSvgText) {
+    track("Download", { format: "svg" });
     downloadText(`${state.lastStem || "sandtrace"}.svg`, state.lastSvgText, "image/svg+xml");
   }
 });
